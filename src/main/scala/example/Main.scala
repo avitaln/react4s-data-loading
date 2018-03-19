@@ -5,14 +5,14 @@ import scala.concurrent.Future
 
 object Main {
   def main(arguments: Array[String]): Unit = {
-    val component = Component(MainComponent)
+    val component = Component(MainComponentCacheUsingState)
     ReactBridge.renderToDomById(component, "main")
   }
 }
 
 ////
 
-case class MainComponent() extends Component[NoEmit] {
+case class MainComponentNoCache() extends Component[NoEmit] {
   private val idState = State("")
   private val labels = Seq("tab1","tab2")
   private val activeTabState = State("tab1")
@@ -22,7 +22,32 @@ case class MainComponent() extends Component[NoEmit] {
       Component(SearchComponent).withHandler(idState.set),
       E.hr(),
       Component(TabsComponent, labels, get(activeTabState)).withHandler(activeTabState.set),
-      Component(SelfLoadingTabContent, TabProp(get(idState), get(activeTabState)))
+      Component(TabContentComponent, TabProp(get(idState), get(activeTabState)))
+    )
+  }
+}
+
+////
+
+case class MainComponentCacheUsingState() extends Component[NoEmit] {
+  private val idState = State("")
+  private val labels = Seq("tab1","tab2")
+  private val activeTabState = State("tab1")
+  private val cachedData = State(Map[String, String]())
+
+  override def render(get: Get): ElementOrComponent = {
+    val activeTab = get(activeTabState)
+    E.div(
+      Component(SearchComponent).withHandler{ newId ⇒
+        cachedData.set(Map.empty) // clear cache
+        idState.set(newId)
+      },
+      E.hr(),
+      Component(TabsComponent, labels, get(activeTabState)).withHandler(activeTabState.set),
+      Component(
+        EmittingTabContentComponent,
+        EmittingTabProp(get(idState), activeTab, get(cachedData).get(activeTab))
+      ).withHandler { loadedData ⇒ cachedData.modify(_.updated(activeTab, loadedData)) }
     )
   }
 }
@@ -75,8 +100,8 @@ case class TabsComponent(labels: P[Seq[String]], active: P[String]) extends Comp
 
 case class TabProp(id: String, kind: String)
 
-case class SelfLoadingTabContent(prop: P[TabProp]) extends Component[NoEmit] {
-  private val loader = Loader(this, prop) { prop ⇒
+case class TabContentComponent(prop: P[TabProp]) extends Component[NoEmit] {
+  private lazy val loader = Loader(this, prop) { prop ⇒
     if (prop.id.isEmpty) {
       Future.successful("")
     } else {
@@ -89,3 +114,27 @@ case class SelfLoadingTabContent(prop: P[TabProp]) extends Component[NoEmit] {
     get(loader).map { data ⇒ E.div(Text(data)) }.getOrElse(E.div(Text("Nothing here")))
 }
 
+
+////
+
+case class EmittingTabProp(id: String, kind: String, cachedData: Option[String])
+
+case class EmittingTabContentComponent(prop: P[EmittingTabProp]) extends Component[String] {
+  private lazy val loader = Loader(this, prop) { prop ⇒
+    if (prop.id.isEmpty) {
+      Future.successful("")
+    } else {
+      prop.cachedData.map { cachedData ⇒
+        Future.successful(cachedData)
+      }.getOrElse {
+        println(s"load ${prop.kind}/${prop.id}")
+        val data = s"data for ${prop.kind}/${prop.id}"
+        emit(data) // will cause main component to cache it
+        Future.successful(data)
+      }
+    }
+  }
+
+  override def render(get: Get): ElementOrComponent =
+    get(loader).map { data ⇒ E.div(Text(data)) }.getOrElse(E.div(Text("Nothing here")))
+}
